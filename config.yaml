@@ -1,0 +1,283 @@
+bert_model:
+  model_id: models/all-MiniLM-L12-v2
+  threshold: 0.6
+  use_cpu: true
+
+semantic_cache:
+  enabled: true
+  backend_type: "memory"  # Options: "memory", "milvus", or "hybrid"
+  similarity_threshold: 0.8
+  max_entries: 1000  # Only applies to memory backend
+  ttl_seconds: 3600
+  eviction_policy: "fifo"
+  # HNSW index configuration (for memory backend only)
+  use_hnsw: true  # Enable HNSW index for faster similarity search
+  hnsw_m: 16  # Number of bi-directional links (higher = better recall, more memory)
+  hnsw_ef_construction: 200  # Construction parameter (higher = better quality, slower build)
+
+  # Hybrid cache configuration (when backend_type: "hybrid")
+  # Combines in-memory HNSW for fast search with Milvus for scalable storage
+  # max_memory_entries: 100000 # Max entries in HNSW index (default: 100,000)
+  # backend_config_path: "config/milvus.yaml" # Path to Milvus config
+
+  # Embedding model for semantic similarity matching
+  # Options: "bert" (fast, 384-dim), "qwen3" (high quality, 1024-dim, 32K context), "gemma" (balanced, 768-dim, 8K context)
+  # Default: "bert" (fastest, lowest memory)
+  embedding_model: "bert"
+
+tools:
+  enabled: true
+  top_k: 3
+  similarity_threshold: 0.2
+  tools_db_path: "config/tools_db.json"
+  fallback_to_empty: true
+
+prompt_guard:
+  enabled: true  # Global default - can be overridden per category with jailbreak_enabled
+  use_modernbert: true
+  model_id: "models/jailbreak_classifier_modernbert-base_model"
+  threshold: 0.7
+  use_cpu: true
+  jailbreak_mapping_path: "models/jailbreak_classifier_modernbert-base_model/jailbreak_type_mapping.json"
+
+# vLLM Endpoints Configuration
+# We run vLLM directly on the host on ports 8000/8001/8002.
+vllm_endpoints:
+  - name: "qwen-endpoint"
+    address: "127.0.0.1"
+    port: 8000
+    weight: 1
+  - name: "ministral-endpoint"
+    address: "127.0.0.1"
+    port: 8001
+    weight: 1
+  - name: "deepseek-endpoint"
+    address: "127.0.0.1"
+    port: 8002
+    weight: 1
+
+model_config:
+  "/home/cloud-user/models/Qwen2.5-3B-Instruct":
+    reasoning_family: "qwen3"
+    preferred_endpoints: ["qwen-endpoint"]
+  "/home/cloud-user/models/Ministral-3-3B-Instruct-2512":
+    preferred_endpoints: ["ministral-endpoint"]
+  "/home/cloud-user/models/DeepSeek-R1-Distill-Qwen-14B":
+    reasoning_family: "deepseek"
+    preferred_endpoints: ["deepseek-endpoint"]
+
+# Classifier configuration (uses minimal models you downloaded)
+classifier:
+  category_model:
+    # Disable domain (Candle BERT) classifier for this demo to avoid
+    # hard failures when classifying with Candle. We rely only on
+    # keyword_rules for intelligent routing.
+    model_id: ""
+    use_modernbert: false
+    threshold: 0.0
+    use_cpu: true
+    category_mapping_path: ""
+  pii_model:
+    model_id: "models/pii_classifier_modernbert-base_presidio_token_model"
+    use_modernbert: true
+    threshold: 0.7
+    use_cpu: true
+    pii_mapping_path: "models/pii_classifier_modernbert-base_presidio_token_model/pii_type_mapping.json"
+
+# Keyword rules for simple, deterministic routing in the demo.
+# These do not depend on the ModernBERT category classifier and ensure
+# decisions are triggered based on prompt patterns.
+keyword_rules:
+  - name: "technical_support"
+    operator: "OR"
+    keywords:
+      - "error"
+      - "stack trace"
+      - "connection timeout"
+      - "troubleshoot"
+      - "debug"
+    case_sensitive: false
+
+  - name: "product_inquiry"
+    operator: "OR"
+    keywords:
+      - "pricing"
+      - "price"
+      - "subscription plan"
+      - "features"
+      - "compare plans"
+    case_sensitive: false
+
+  - name: "account_management"
+    operator: "OR"
+    keywords:
+      - "password reset"
+      - "reset my password"
+      - "account recovery"
+      - "login issue"
+      - "sign in problem"
+    case_sensitive: false
+
+  - name: "general_inquiry"
+    operator: "OR"
+    keywords:
+      - "fun facts"
+      - "tell me about"
+      - "what is"
+      - "explain"
+    case_sensitive: false
+
+# Categories define domain metadata only (no routing logic)
+categories:
+  - name: technical_support
+    description: "Technical support and troubleshooting queries"
+    mmlu_categories: ["technical_support"]
+  - name: product_inquiry
+    description: "Product information and specifications"
+    mmlu_categories: ["product_inquiry"]
+  - name: account_management
+    description: "Account and subscription management"
+    mmlu_categories: ["account_management"]
+  - name: general_inquiry
+    description: "General questions and information requests"
+    mmlu_categories: ["general_inquiry"]
+
+strategy: "priority"
+
+decisions:
+  # Technical issues → DeepSeek (reasoning on)
+  - name: "technical_support_decision"
+    description: "Technical support and troubleshooting queries"
+    priority: 100
+    rules:
+      operator: "AND"
+      conditions:
+        - type: "keyword"
+          name: "technical_support"
+    modelRefs:
+      - model: "/home/cloud-user/models/DeepSeek-R1-Distill-Qwen-14B"
+        use_reasoning: true
+    plugins:
+      - type: "system_prompt"
+        configuration:
+          system_prompt: "You are a technical support specialist. Provide detailed, step-by-step guidance for technical issues. Use clear explanations and include relevant troubleshooting steps."
+      - type: "jailbreak"
+        configuration:
+          enabled: true
+      - type: "pii"
+        configuration:
+          enabled: true
+          pii_types_allowed: []
+      - type: "semantic-cache"
+        configuration:
+          enabled: true
+          similarity_threshold: 0.9
+
+  # Product / business info → Ministral
+  - name: "product_inquiry_decision"
+    description: "Product information and specifications"
+    priority: 100
+    rules:
+      operator: "AND"
+      conditions:
+        - type: "keyword"
+          name: "product_inquiry"
+    modelRefs:
+      - model: "/home/cloud-user/models/Ministral-3-3B-Instruct-2512"
+        use_reasoning: false
+    plugins:
+      - type: "system_prompt"
+        configuration:
+          system_prompt: "You are a product specialist. Provide accurate information about products, features, pricing, and availability. Be helpful and informative."
+      - type: "jailbreak"
+        configuration:
+          enabled: true
+      - type: "pii"
+        configuration:
+          enabled: false
+          pii_types_allowed: []
+      - type: "semantic-cache"
+        configuration:
+          enabled: true
+          similarity_threshold: 0.85
+
+  # Account queries → Qwen
+  - name: "account_management_decision"
+    description: "Account and subscription management"
+    priority: 100
+    rules:
+      operator: "AND"
+      conditions:
+        - type: "keyword"
+          name: "account_management"
+    modelRefs:
+      - model: "/home/cloud-user/models/Qwen2.5-3B-Instruct"
+        use_reasoning: false
+    plugins:
+      - type: "system_prompt"
+        configuration:
+          system_prompt: "You are an account management assistant. Help users with account-related tasks such as password resets, profile updates, and subscription management. Prioritize security and privacy."
+      - type: "jailbreak"
+        configuration:
+          enabled: true
+      - type: "pii"
+        configuration:
+          enabled: true
+          pii_types_allowed: []
+      - type: "semantic-cache"
+        configuration:
+          enabled: true
+          similarity_threshold: 0.9
+
+  # General questions → Qwen (default)
+  - name: "general_inquiry_decision"
+    description: "General questions and information requests"
+    priority: 50
+    rules:
+      operator: "AND"
+      conditions:
+        - type: "keyword"
+          name: "general_inquiry"
+    modelRefs:
+      - model: "/home/cloud-user/models/Qwen2.5-3B-Instruct"
+        use_reasoning: false
+    plugins:
+      - type: "system_prompt"
+        configuration:
+          system_prompt: "You are a helpful general assistant. Answer questions clearly and concisely. If you need more information, ask clarifying questions."
+      - type: "jailbreak"
+        configuration:
+          enabled: true
+      - type: "pii"
+        configuration:
+          enabled: false
+          pii_types_allowed: []
+      - type: "semantic-cache"
+        configuration:
+          enabled: true
+          similarity_threshold: 0.8
+
+# Embedding Models Configuration (for semantic cache / tools)
+embedding_models:
+  qwen3_model_path: "models/Qwen3-Embedding-0.6B"
+  gemma_model_path: "models/embeddinggemma-300m"
+  use_cpu: true  # Set to false for GPU acceleration (requires CUDA)
+
+# Default model for fallback (used when no decision matches)
+default_model: "/home/cloud-user/models/Qwen2.5-3B-Instruct"
+
+# Reasoning family configurations (used when use_reasoning: true)
+reasoning_families:
+  deepseek:
+    type: "chat_template_kwargs"
+    parameter: "thinking"
+
+  qwen3:
+    type: "chat_template_kwargs"
+    parameter: "enable_thinking"
+
+default_reasoning_effort: high
+
+# Entropy-based reasoning configuration (not heavily used in this demo)
+entropy_threshold: 0.5
+high_entropy_threshold: 0.8
