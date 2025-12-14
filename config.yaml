@@ -281,3 +281,4 @@ default_reasoning_effort: high
 # Entropy-based reasoning configuration (not heavily used in this demo)
 entropy_threshold: 0.5
 high_entropy_threshold: 0.8
+
