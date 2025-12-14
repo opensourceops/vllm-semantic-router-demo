@@ -198,7 +198,22 @@ During a live demo, read the logs top-down:
 
 ---
 
-## 8. Links
+## 8. Stop All Processes
+
+When you are done with the demo, stop the vLLM servers, router, and Envoy:
+
+```bash
+pkill -f "vllm serve"
+sleep 5
+pkill -f "bin/router" 2>/dev/null || true
+pkill -f "func-e.*envoy" 2>/dev/null || true
+```
+
+You can then inspect logs in `~/logs` or restart components as needed.
+
+---
+
+## 9. Links
 
 - vLLM: https://github.com/vllm-project/vllm  
-- Semantic Router: https://github.com/vllm-project/semantic-router  
+- Semantic Router: https://github.com/vllm-project/semantic-router
